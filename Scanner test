@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>taina · тест сканера</title>
+<style>
+:root{--ink:#0d0a08;--panel:#15100b;--acc:#c9a876;--acc-hot:#e8c890;--parch:#ede3d0;--muted:#94836a;--line:rgba(201,168,118,.22);--ok:#5ec98a;--err:#e07080}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--ink);color:var(--parch);font-family:'JetBrains Mono',ui-monospace,monospace;padding:24px;line-height:1.5}
+.wrap{max-width:900px;margin:0 auto}
+h1{font-size:20px;color:var(--acc-hot);margin-bottom:4px}
+.sub{color:var(--muted);font-size:13px;margin-bottom:20px}
+.drop{border:2px dashed var(--line);border-radius:16px;padding:40px 20px;text-align:center;cursor:pointer;transition:.2s;background:var(--panel)}
+.drop:hover,.drop.over{border-color:var(--acc);background:rgba(201,168,118,.06)}
+.drop input{display:none}
+.drop-txt{color:var(--muted);font-size:14px}
+.row{display:flex;gap:20px;margin-top:20px;flex-wrap:wrap}
+.col{flex:1 1 300px}
+canvas{max-width:100%;border:1px solid var(--line);border-radius:12px;background:#000;display:block}
+.result{margin-top:16px;padding:16px;border-radius:12px;background:var(--panel);border:1px solid var(--line);min-height:60px}
+.result.ok{border-color:var(--ok)}
+.result.err{border-color:var(--err)}
+.res-label{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:6px}
+.res-text{font-size:22px;font-weight:700;word-break:break-word}
+.res-text.ok{color:var(--ok)}
+.res-text.err{color:var(--err)}
+.diag{margin-top:16px;font-size:12px;color:var(--muted);white-space:pre-wrap;background:#0a0806;padding:12px;border-radius:10px;border:1px solid var(--line);max-height:300px;overflow-y:auto}
+.diag b{color:var(--acc)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>taina · тест сканера</h1>
+  <p class="sub">Пісочниця для розробки. Завантаж орнамент — покаже, що прочиталось і як.</p>
+
+  <label class="drop" id="drop">
+    <input type="file" id="file" accept="image/*">
+    <div class="drop-txt">📷 Клікни або перетягни орнамент сюди</div>
+  </label>
+
+  <div class="row">
+    <div class="col">
+      <div class="res-label">Завантажене</div>
+      <canvas id="cv" width="512" height="512"></canvas>
+    </div>
+    <div class="col">
+      <div class="result" id="result">
+        <div class="res-label">Результат</div>
+        <div class="res-text" id="restext">—</div>
+      </div>
+      <div class="diag" id="diag">Очікую зображення…</div>
+    </div>
+  </div>
+</div>
+
+<script>
+const enc=new TextEncoder();
+const decFatal=new TextDecoder('utf-8',{fatal:true});
+const CH=['r','g','b'];
+const RGB_SOFT={r:[220,50,60],g:[65,195,65],b:[60,70,215]};
+const RGBTHR=125;
+
+const MINN=7, MAXN=145;
+function Rof(n){return (n-1)/2}
+function capacity(m,n){const R=Rof(n);
+  if(m==='oct')return (R+1)*(R+2)/2;
+  if(m==='quad')return (R+1)*(R+1);
+  if(m==='half')return (R+1)*n;
+  return 0;}
+function baseCells(m,n){const c=Rof(n),R=c,o=[];
+  if(m==='oct'){for(let i=0;i<=R;i++)for(let j=0;j<=i;j++)o.push([c+i,c+j]);}
+  else if(m==='quad'){for(let i=0;i<=R;i++)for(let j=0;j<=R;j++)o.push([c+i,c+j]);}
+  else{for(let y=0;y<n;y++)for(let i=0;i<=R;i++)o.push([c+i,y]);}
+  return o;}
+function mirrors(m,n,x,y){const c=Rof(n),i=x-c,j=y-c;let p;
+  if(m==='oct')p=[[i,j],[j,i],[-i,j],[-j,i],[i,-j],[j,-i],[-i,-j],[-j,-i]];
+  else if(m==='quad')p=[[i,j],[-i,j],[i,-j],[-i,-j]];
+  else p=[[i,j],[-i,j]];
+  const o=[];
+  for(const [a,b] of p){const X=c+a,Y=c+b;if(X>=0&&Y>=0&&X<n&&Y<n)o.push([X,Y])}
+  return o;}
+function pickN2(m,need){for(let n=MINN;n<=MAXN;n+=2)if(capacity(m,n)>=need)return n;return MAXN;}
+
+function textBits(t){
+  const data=enc.encode(t);
+  const bits=new Uint8Array(data.length*8);
+  for(let i=0;i<data.length;i++)for(let b=0;b<8;b++)bits[i*8+b]=(data[i]>>(7-b))&1;
+  return {nby:data.length,bits};}
+function isClean(t){for(const ch of t){const o=ch.codePointAt(0);
+  if(o===0)return false;if(o<32&&ch!=='\n'&&ch!=='\t')return false;}return true;}
+function bytesToText(by){
+  while(by.length&&by[by.length-1]===0)by.pop();
+  if(!by.length)return null;
+  try{const t=decFatal.decode(new Uint8Array(by));return isClean(t)?t:null}catch(e){return null}}
+/* offset: 0 чистий; 1 коли перша комірка — мітка (лише R монолита) */
+function decodeSector(g,n,m,offset){
+  const bc=baseCells(m,n),by=[];
+  const start=offset||0;
+  for(let i=start;i+7<bc.length;i+=8){
+    let v=0;
+    for(let b=0;b<8;b++){const [x,y]=bc[i+b];v=(v<<1)|(g[y*n+x]?1:0)}
+    by.push(v);}
+  return bytesToText(by);}
+function markCell(g,n,m){const [x,y]=baseCells(m,n)[0];return g[y*n+x]?1:0;}
+
+function rowBuild(text,maxB){
+  const chars=[...text],w=maxB*8,h=Math.max(chars.length,1);
+  const g=new Uint8Array(w*h);
+  chars.forEach((c,r)=>{const bs=enc.encode(c);
+    for(let i=0;i<maxB;i++){const v=i<bs.length?bs[i]:0;
+      for(let b=0;b<8;b++)g[r*w+i*8+b]=(v>>(7-b))&1;}});
+  return {g,w,h};}
+function rowDecode(g,w,h){
+  if(w%8)return null;const maxB=w/8;if(maxB<1||maxB>4)return null;
+  let out='';
+  for(let r=0;r<h;r++){
+    const bs=[];
+    for(let i=0;i<maxB;i++){let v=0;for(let b=0;b<8;b++)v=(v<<1)|g[r*w+i*8+b];bs.push(v)}
+    while(bs.length&&bs[bs.length-1]===0)bs.pop();
+    if(!bs.length)continue;
+    try{out+=decFatal.decode(new Uint8Array(bs))}catch(e){return null}}
+  return (out&&isClean(out))?out:null;}
+
+function texts(){return layers===1?[D.single,'','']:D.ch.slice()}
+
+/* markBit: null=чисто; 0/1 = перша комірка мітка (лише для R монолита) */
+function fillChannel(t,n,m,markBit){
+  const g=new Uint8Array(n*n),dm=new Uint8Array(n*n);
+  const bc=baseCells(m,n);
+  let seq;
+  if(markBit===null){const {bits}=textBits(t);seq=bits;}
+  else{const {bits}=textBits(t);seq=new Uint8Array(bits.length+1);seq[0]=markBit;seq.set(bits,1);}
+  const lim=Math.min(seq.length,bc.length);
+  const ovf=seq.length>bc.length;
+  for(let i=0;i<lim;i++){const [x,y]=bc[i];
+    for(const [X,Y] of mirrors(m,n,x,y)){dm[Y*n+X]=1;if(seq[i])g[Y*n+X]=1}}
+  return {g,dm,ovf};}
+
+function build(){
+  const T=texts();
+  if(!T.some(t=>t.length)){clearStage();
+    ['s-ch','s-by','s-bits'].forEach(id=>$(id).textContent='0');
+    $('s-fld').textContent='—';$('s-cap').textContent='0';$('s-fill').textContent='0%';
+    $('s-warn').style.display='none';$('rt').innerHTML='';
+    for(let i=0;i<3;i++)$('d-'+i).classList.remove('filled');
+    return;}
+  let nch=0,nby=0,maxBits=0,ovf=false;
+  T.forEach(t=>{if(t){nch+=[...t].length;nby+=enc.encode(t).length;
+    maxBits=Math.max(maxBits,enc.encode(t).length*8)}});
+
+  if(mode==='row'){
+    let maxB=1;
+    T.forEach(t=>{for(const c of t){const k=enc.encode(c).length;if(k>maxB)maxB=k}});
+    const h=Math.max(...T.map(t=>[...t].length),1);
+    W=maxB*8;H=h;
+    CH.forEach((k,i)=>{
+      const g=new Uint8Array(W*H),dm=new Uint8Array(W*H);
+      if(T[i]){const r=rowBuild(T[i],maxB);
+        g.set(r.g.subarray(0,Math.min(r.g.length,g.length)));
+        const rows=[...T[i]].length;
+        for(let y=0;y<Math.min(rows,H);y++)for(let x=0;x<W;x++)dm[y*W+x]=1;}
+      grid[k]=g;dmask[k]=dm;});
+    $('s-fld').textContent=W+'×'+H;$('s-cap').textContent=W*H;
+    $('s-fill').textContent=Math.round(maxBits/(W*H)*100)+'%';
+  }else{
+    /* монолит додає 1 біт мітки лише в R */
+    const extraR=(layers===3&&monoMark===1)?1:0;
+    const n=pickN2(mode,maxBits+extraR);W=H=n;
+    const bc=baseCells(mode,n);
+    CH.forEach((k,i)=>{
+      let markBit=null;
+      if(layers===3&&monoMark===1&&i===0)markBit=1;   /* лише R монолита */
+      const r=fillChannel(T[i]||'',n,mode,markBit);
+      grid[k]=r.g;dmask[k]=r.dm;if(r.ovf)ovf=true;});
+    $('s-fld').textContent=n+'×'+n;$('s-cap').textContent=bc.length;
+    $('s-fill').textContent=Math.round((maxBits+extraR)/bc.length*100)+'%';}
+
+  $('s-ch').textContent=nch;$('s-by').textContent=nby;$('s-bits').textContent=maxBits;
+  $('s-warn').style.display=ovf?'block':'none';
+  render();
+
+  let ok;
+  if(mode==='row'){
+    const got=CH.map(k=>rowDecode(grid[k],W,H));
+    ok=CH.every((k,i)=>(got[i]||'')===(T[i]||''));
+  }else if(layers===1){
+    ok=decodeSector(grid.r,W,mode,0)===D.single;
+  }else if(monoMark===1){
+    const rR=decodeSector(grid.r,W,mode,1),rG=decodeSector(grid.g,W,mode,0),rB=decodeSector(grid.b,W,mode,0);
+    ok=((rR||'')+(rG||'')+(rB||''))===T.join('');
+  }else{
+    const got=CH.map(k=>decodeSector(grid[k],W,mode,0));
+    ok=CH.every((k,i)=>(got[i]||'')===(T[i]||''));}
+  $('rt').innerHTML=ok?'<span class="g">✓ цей орнамент декодується</span>':'<span class="w">перевір текст</span>';
+  hasImage=true;syncMain();
+  for(let i=0;i<3;i++)$('d-'+i).classList.toggle('filled',(D.ch[i]||'').length>0);}
+
+/* ── рендер ── */
+const FRAME_COL='#8f8f8f';   /* нейтрально-сіра рамка — видно і світле, і темне */
+function paint(ctx,cell,pad){
+  const TW=(W+pad*2)*cell,TH=(H+pad*2)*cell;
+  if(pad>0){ctx.fillStyle=FRAME_COL;ctx.fillRect(0,0,TW,TH)}
+  ctx.fillStyle=colZero;ctx.fillRect(pad*cell,pad*cell,W*cell,H*cell);   /* поле = колір нуля */
+  const put=(x,y,col)=>{ctx.fillStyle=col;const px=(x+pad)*cell,py=(y+pad)*cell;
+    if(shape==='circle'){ctx.beginPath();ctx.arc(px+cell/2,py+cell/2,cell/2*.94,0,6.2832);ctx.fill()}
+    else ctx.fillRect(px,py,cell,cell)};
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){
+    const i=y*W+x;
+    if(layers===3){
+      const inAny=dmask.r[i]||dmask.g[i]||dmask.b[i];if(!inAny)continue;
+      const on={r:dmask.r[i]&&grid.r[i],g:dmask.g[i]&&grid.g[i],b:dmask.b[i]&&grid.b[i]};
+      if(!on.r&&!on.g&&!on.b)continue;
+      /* м'які кольори, аддитивне змішування по каналах */
+      let R=0,G=0,B=0;
+      if(on.r){R+=RGB_SOFT.r[0];G+=RGB_SOFT.r[1];B+=RGB_SOFT.r[2]}
+      if(on.g){R+=RGB_SOFT.g[0];G+=RGB_SOFT.g[1];B+=RGB_SOFT.g[2]}
+      if(on.b){R+=RGB_SOFT.b[0];G+=RGB_SOFT.b[1];B+=RGB_SOFT.b[2]}
+      put(x,y,`rgb(${Math.min(255,R)},${Math.min(255,G)},${Math.min(255,B)})`);
+    }else{
+      if(!dmask.r[i])continue;
+      if(!grid.r[i])continue;   /* нуль = фон */
+      put(x,y,colOne);}}}
+function render(){
+  const pad=frameW,tw=W+pad*2,th=H+pad*2;
+  const cell=Math.max(2,Math.floor(760/Math.max(tw,th)));
+  OFF.width=tw*cell;OFF.height=th*cell;
+  OCTX.imageSmoothingEnabled=false;
+  paint(OCTX,cell,pad);blit();}
+
+/* ═══════ ДЕКОДЕР КАРТИНКИ ═══════ */
+function scanImage(px,IW,IH){
+  const lum=p=>(px[p]+px[p+1]+px[p+2])/3;
+  /* збираємо довжини серій по кількох лініях; повертаємо кандидатів розміру клітини */
+  const measure=()=>{
+    const runs=[];
+    for(const f of [.15,.25,.35,.5,.65,.75,.85]){
+      const y=Math.floor(IH*f);let prev=-1,len=0;
+      for(let x=0;x<IW;x++){const cc=lum((y*IW+x)*4)>127?1:0;
+        if(cc===prev)len++;else{if(prev>=0&&x>1&&x<IW-1)runs.push(len);prev=cc;len=1}}
+      const x0=Math.floor(IW*f);prev=-1;len=0;
+      for(let y2=0;y2<IH;y2++){const cc=lum((y2*IW+x0)*4)>127?1:0;
+        if(cc===prev)len++;else{if(prev>=0&&y2>1&&y2<IH-1)runs.push(len);prev=cc;len=1}}}
+    if(!runs.length)return [];
+    const freq=new Map();
+    for(const r of runs)if(r>0)freq.set(r,(freq.get(r)||0)+1);
+    /* найчастіші серії = розмір клітини (стійко до рамки й шуму) */
+    const sorted=[...freq.entries()].sort((a,b)=>b[1]-a[1]);
+    const cands=new Set();
+    for(let i=0;i<Math.min(4,sorted.length);i++)cands.add(sorted[i][0]);
+    cands.add(Math.min(...runs));
+    return [...cands].filter(m=>m>0);
+  };
+  const mmCands=measure();
+  const readChan=(T,pad,n,ci)=>{const g=new Uint8Array(n*n),s=IW/T,sy=IH/T;
+    for(let y=0;y<n;y++)for(let x=0;x<n;x++){
+      const p=(Math.floor((y+pad+.5)*sy)*IW+Math.floor((x+pad+.5)*s))*4;
+      const v=ci<0?lum(p):px[p+ci];
+      g[y*n+x]=v>(ci<0?110:RGBTHR)?1:0;}
+    return g;};
+  const readRow=(TW,pad,w,h,ci)=>{const g=new Uint8Array(w*h),s=IW/TW;
+    for(let y=0;y<h;y++)for(let x=0;x<w;x++){
+      const p=(Math.floor((y+pad+.5)*s)*IW+Math.floor((x+pad+.5)*s))*4;
+      const v=ci<0?lum(p):px[p+ci];
+      g[y*w+x]=v>110?1:0;}
+    return g;};
+
+  const Tset=new Set();
+  for(const mm of mmCands){
+    if(mm<2)continue;
+    /* точний варіант (як раніше) */
+    for(const k of [1,2,.5]){const ms=Math.round(mm*k);
+      if(ms>0&&IW%ms===0){const T=IW/ms;if(T>=MINN&&T<=200)Tset.add(T)}}
+    /* стійкий варіант: T як кількість клітин при дробовому кроці — читає масштабовані */
+    for(const k of [1,2,.5]){const cell=mm*k;
+      if(cell>=2){const Tc=IW/cell;
+        for(const Tr of [Math.round(Tc),Math.floor(Tc),Math.ceil(Tc)]){
+          if(Tr>=MINN&&Tr<=200)Tset.add(Tr);}}}
+  }
+
+  const results=[];
+  if(IW===IH)for(const T of Tset){
+    for(const pad of [0,1,2]){
+      const n=T-2*pad;
+      if(n<MINN||n%2===0)continue;
+      const cr=readChan(T,pad,n,0),cg=readChan(T,pad,n,1),cb=readChan(T,pad,n,2);
+      const cl=readChan(T,pad,n,-1);  /* яскравісний для моно */
+      let sameRGB=true;
+      for(let z=0;z<cr.length;z++){if(cr[z]!==cg[z]||cr[z]!==cb[z]){sameRGB=false;break}}
+      for(const m of ['oct','quad','half']){
+        /* моно за яскравістю пробуємо ЗАВЖДИ — надійно для розфарбованих одноколірних */
+        {const t=decodeSector(cl,n,m,0);
+         if(t!==null){
+           const chk=fillChannel(t,n,m,null);
+           let same=true;for(let z=0;z<n*n&&same;z++)if((chk.g[z]?1:0)!==cl[z])same=false;
+           if(same)results.push({kind:'one',mode:m,n,pad,res:[t,null,null]});}}
+        if(!sameRGB){
+          if(markCell(cr,n,m)===1){
+            const rR=decodeSector(cr,n,m,1),rG=decodeSector(cg,n,m,0),rB=decodeSector(cb,n,m,0);
+            if(rR!==null)results.push({kind:'mono',mode:m,n,pad,res:[(rR||'')+(rG||'')+(rB||''),null,null]});}
+          const tr=decodeSector(cr,n,m,0),tg=decodeSector(cg,n,m,0),tb=decodeSector(cb,n,m,0);
+          const cnt=[tr,tg,tb].filter(x=>x!==null).length;
+          if(cnt>=2){
+            const nonEmpty=[tr,tg,tb].filter(x=>x!==null);
+            const allSame=nonEmpty.every(x=>x===nonEmpty[0]);
+            if(!allSame)results.push({kind:'three',mode:m,n,pad,res:[tr,tg,tb]});}}}}}
+
+  for(const pad of [0,1,2])for(const w of [8,16,24,32]){
+    const TW=w+pad*2;if(IW%TW)continue;
+    const cell=IW/TW;if(IH%cell)continue;
+    if(mmCands.length&&!mmCands.some(mm=>Math.abs(cell-mm)<=1.5||Math.abs(cell-mm*2)<=1.5))continue;
+    const TH=IH/cell,h=TH-pad*2;if(h<1||h>250)continue;
+    const g=readRow(TW,pad,w,h,-1);
+    const t=rowDecode(g,w,h);
+    if(t===null)continue;
+    let mb=1;for(const c of t){const k=enc.encode(c).length;if(k>mb)mb=k}
+    if(mb*8!==w)continue;
+    const r=rowBuild(t,mb);
+    if(r.w!==w||r.h!==h)continue;
+    let same=true;for(let i=0;i<w*h&&same;i++)if((r.g[i]?1:0)!==(g[i]?1:0))same=false;
+    if(same)results.push({kind:'one',mode:'row',n:w,pad,res:[t,null,null]});}
+
+  /* дедуплікація однакових результатів */
+  const seen=new Set(),uniq=[];
+  for(const r of results){const key=r.kind+'|'+r.res.join('\u0001');
+    if(!seen.has(key)){seen.add(key);uniq.push(r)}}
+  uniq.sort((a,b)=>{
+    /* найдовший валідний текст перемагає (повне моно > обрізане RGB) */
+    const al=a.res.filter(x=>x).join('').length,bl=b.res.filter(x=>x).join('').length;
+    if(al!==bl)return bl-al;
+    /* за рівної довжини — three з більшою к-стю каналів, потім менше поле */
+    const ax=a.kind==='three'?a.res.filter(x=>x).length:9;
+    const bx=b.kind==='three'?b.res.filter(x=>x).length:9;
+    if(a.kind==='three'&&b.kind==='three'&&ax!==bx)return bx-ax;
+    return a.n-b.n;});
+  /* фільтр сміття: якщо є впевнений результат (≥3 символи), прибираємо
+     дуже короткі побічні знахідки від ширшого перебору T */
+  if(uniq.length>1){
+    const topLen=uniq[0].res.filter(x=>x).join('').length;
+    if(topLen>=3){
+      const filtered=uniq.filter(r=>r.res.filter(x=>x).join('').length>=3);
+      if(filtered.length)return filtered;
+    }
+  }
+  return uniq;}
+
+
+
+// ── UI ──
+const $=id=>document.getElementById(id);
+const cv=$('cv'),ctx=cv.getContext('2d',{willReadFrequently:true});
+const drop=$('drop'),file=$('file');
+
+function log(msg){$('diag').innerHTML=msg;}
+
+function processImage(img){
+  const t0=performance.now();
+  // вписываю в 512, сохраняя пропорции, центр на чёрном
+  const S=512;
+  ctx.fillStyle='#000';ctx.fillRect(0,0,S,S);
+  const scale=Math.min(S/img.width,S/img.height);
+  const w=img.width*scale,h=img.height*scale;
+  ctx.imageSmoothingEnabled=false;
+  ctx.drawImage(img,(S-w)/2,(S-h)/2,w,h);
+  const IW=S,IH=S;
+  const imgData=ctx.getImageData(0,0,IW,IH);
+  const px=imgData.data;
+  let found=[];
+  try{ found=scanImage(px,IW,IH); }catch(e){ log('<b>ПОМИЛКА:</b> '+e.message); return; }
+  const dt=(performance.now()-t0).toFixed(0);
+  const rbox=$('result'),rtext=$('restext');
+  if(found.length){
+    const best=found[0];
+    const txt=best.res.filter(x=>x).join(' | ');
+    rtext.textContent=txt;rtext.className='res-text ok';rbox.className='result ok';
+    let d='<b>✓ ПРОЧИТАНО</b> за '+dt+' мс\n';
+    d+='розмір: '+img.width+'×'+img.height+' → '+IW+'×'+IH+'\n';
+    d+='варіантів знайдено: '+found.length+'\n\n';
+    found.slice(0,5).forEach((f,i)=>{
+      d+=(i+1)+'. "'+f.res.filter(x=>x).join(' | ')+'"  [n='+f.n+' '+f.mode+' pad='+f.pad+' '+f.kind+']\n';
+    });
+    log(d);
+  }else{
+    rtext.textContent='не прочиталось';rtext.className='res-text err';rbox.className='result err';
+    log('<b>✗ НЕ ПРОЧИТАЛОСЬ</b> за '+dt+' мс\nрозмір: '+img.width+'×'+img.height+' → '+IW+'×'+IH+'\n\nДекодер не знайшов валідної сітки.');
+  }
+}
+
+function loadFile(f){
+  if(!f||!f.type.startsWith('image/'))return;
+  const url=URL.createObjectURL(f);
+  const img=new Image();
+  img.onload=()=>{processImage(img);URL.revokeObjectURL(url);};
+  img.src=url;
+}
+
+file.onchange=e=>loadFile(e.target.files[0]);
+drop.addEventListener('dragover',e=>{e.preventDefault();drop.classList.add('over');});
+drop.addEventListener('dragleave',()=>drop.classList.remove('over'));
+drop.addEventListener('drop',e=>{e.preventDefault();drop.classList.remove('over');loadFile(e.dataTransfer.files[0]);});
+</script>
+</body>
+</html>
