@@ -407,6 +407,54 @@ function cropPx(px,IW,IH,box){
   return out;
 }
 
+// ── ШЛЯХ Б: випрямлення нахилу за 4 кутами ──
+// Знаходимо 4 крайні точки візерунка (при нахилі це кути квадрата),
+// перевіряємо що це квадрат, і «розвертаємо» назад у рівний квадрат.
+function findCorners(px,IW,IH){
+  const lum=p=>(px[p]+px[p+1]+px[p+2])/3;
+  // маска «це візерунок»: НЕ рівний сірий фон (фон часто сірий/однотонний)
+  const isPat=(x,y)=>{
+    const p=(y*IW+x)*4,r=px[p],g=px[p+1],b=px[p+2];
+    const gray=Math.abs(r-g)<22&&Math.abs(g-b)<22&&lum(p)>85&&lum(p)<155;
+    return !gray;
+  };
+  let top=null,bot=null,left=null,right=null;
+  const step=Math.max(1,Math.floor(IW/400));
+  for(let y=0;y<IH;y+=step)for(let x=0;x<IW;x+=step){
+    if(!isPat(x,y))continue;
+    if(!top||y<top[1])top=[x,y];
+    if(!bot||y>bot[1])bot=[x,y];
+    if(!left||x<left[0])left=[x,y];
+    if(!right||x>right[0])right=[x,y];
+  }
+  if(!top||!bot||!left||!right)return null;
+  // перевірка: 4 точки утворюють квадрат (сторони приблизно рівні)
+  const d=(a,b)=>Math.hypot(a[0]-b[0],a[1]-b[1]);
+  const s=[d(top,right),d(right,bot),d(bot,left),d(left,top)];
+  const avg=(s[0]+s[1]+s[2]+s[3])/4;
+  if(avg<30)return null;
+  const spread=Math.max(...s)-Math.min(...s);
+  if(spread/avg>0.25)return null;  // не квадрат — сторони надто різні
+  return {TL:top,TR:right,BR:bot,BL:left,side:avg};
+}
+// випрямляє за 4 кутами у рівний px-масив N×N
+function deskew(px,IW,IH,corners,N){
+  const {TL,TR,BR,BL}=corners;
+  const out=new Uint8ClampedArray(N*N*4);
+  for(let j=0;j<N;j++)for(let i=0;i<N;i++){
+    const u=i/(N-1),v=j/(N-1);
+    const x=(1-u)*(1-v)*TL[0]+u*(1-v)*TR[0]+u*v*BR[0]+(1-u)*v*BL[0];
+    const y=(1-u)*(1-v)*TL[1]+u*(1-v)*TR[1]+u*v*BR[1]+(1-u)*v*BL[1];
+    const xi=Math.round(x),yi=Math.round(y);
+    const dst=(j*N+i)*4;
+    if(xi>=0&&xi<IW&&yi>=0&&yi<IH){
+      const src=(yi*IW+xi)*4;
+      out[dst]=px[src];out[dst+1]=px[src+1];out[dst+2]=px[src+2];out[dst+3]=255;
+    }else{out[dst+3]=255;}
+  }
+  return out;
+}
+
 // ── UI ──
 const $=id=>document.getElementById(id);
 const cv=$('cv'),ctx=cv.getContext('2d',{willReadFrequently:true});
@@ -428,15 +476,32 @@ function processImage(img){
   const px=imgData.data;
   let found=[];
   let pathUsed='пряме';
-  try{ found=scanImage(px,IW,IH); }catch(e){ log('<b>ПОМИЛКА:</b> '+e.message); return; }
-  // ШЛЯХ А: якщо пряме читання не вдалось — шукаємо орнамент серед полів/підпису
-  let box=null;
-  if(!found.length){
-    box=findOrnament(px,IW,IH);
-    if(box){
-      const cpx=cropPx(px,IW,IH,box);
-      try{ found=scanImage(cpx,box.w,box.h); if(found.length)pathUsed='шлях А (обрізка)'; }catch(e){}
-    }
+  let box=null,corners=null;
+  // збираємо результати всіх шляхів, потім беремо найкращий (найдовший текст)
+  const attempts=[];
+  try{ const f=scanImage(px,IW,IH); if(f.length)attempts.push({f,path:'пряме',box:null,corners:null}); }catch(e){}
+  // ШЛЯХ А: обрізка орнаменту серед полів/підпису
+  box=findOrnament(px,IW,IH);
+  if(box){
+    const cpx=cropPx(px,IW,IH,box);
+    try{ const f=scanImage(cpx,box.w,box.h); if(f.length)attempts.push({f,path:'шлях А (обрізка)',box,corners:null}); }catch(e){}
+  }
+  // ШЛЯХ Б: випрямлення нахилу за 4 кутами
+  corners=findCorners(px,IW,IH);
+  if(corners){
+    const N=512;
+    const dpx=deskew(px,IW,IH,corners,N);
+    try{ const f=scanImage(dpx,N,N); if(f.length)attempts.push({f,path:'шлях Б (випрямлення нахилу)',box:null,corners}); }catch(e){}
+  }
+  // обираємо найкращий: найдовший валідний текст
+  if(attempts.length){
+    attempts.sort((a,b)=>{
+      const al=a.f[0].res.filter(x=>x).join('').length;
+      const bl=b.f[0].res.filter(x=>x).join('').length;
+      return bl-al;
+    });
+    const best=attempts[0];
+    found=best.f;pathUsed=best.path;box=best.box;corners=best.corners;
   }
   const dt=(performance.now()-t0).toFixed(0);
   const rbox=$('result'),rtext=$('restext');
@@ -447,6 +512,7 @@ function processImage(img){
     let d='<b>✓ ПРОЧИТАНО</b> за '+dt+' мс\n';
     d+='спосіб: '+pathUsed+'\n';
     if(box)d+='знайдено орнамент: ('+box.x0+','+box.y0+') '+box.w+'×'+box.h+'\n';
+    if(corners)d+='випрямлено нахил, стор.≈'+Math.round(corners.side)+'px\n';
     d+='розмір: '+img.width+'×'+img.height+' → '+IW+'×'+IH+'\n';
     d+='варіантів знайдено: '+found.length+'\n\n';
     found.slice(0,5).forEach((f,i)=>{
