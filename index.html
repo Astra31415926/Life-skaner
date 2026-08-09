@@ -412,14 +412,21 @@ function cropPx(px,IW,IH,box){
 // перевіряємо що це квадрат, і «розвертаємо» назад у рівний квадрат.
 function findCorners(px,IW,IH){
   const lum=p=>(px[p]+px[p+1]+px[p+2])/3;
-  // маска «це візерунок»: НЕ рівний сірий фон (фон часто сірий/однотонний)
+  // визначаємо колір фону за 4 кутами картинки (найчастіший)
+  const corners4=[[0,0],[IW-1,0],[0,IH-1],[IW-1,IH-1]];
+  const bgSamples=corners4.map(([x,y])=>{const p=(y*IW+x)*4;return [px[p],px[p+1],px[p+2]];});
+  // усереднюємо фон
+  const bg=[0,1,2].map(c=>Math.round(bgSamples.reduce((s,v)=>s+v[c],0)/bgSamples.length));
+  const bgLum=(bg[0]+bg[1]+bg[2])/3;
+  // «це орнамент» = помітно відрізняється від фону
   const isPat=(x,y)=>{
-    const p=(y*IW+x)*4,r=px[p],g=px[p+1],b=px[p+2];
-    const gray=Math.abs(r-g)<22&&Math.abs(g-b)<22&&lum(p)>85&&lum(p)<155;
-    return !gray;
+    const p=(y*IW+x)*4;
+    const dr=px[p]-bg[0],dg=px[p+1]-bg[1],db=px[p+2]-bg[2];
+    const dist=Math.sqrt(dr*dr+dg*dg+db*db);
+    return dist>60;  // достатньо відмінний від фону
   };
   let top=null,bot=null,left=null,right=null;
-  const step=Math.max(1,Math.floor(IW/400));
+  const step=Math.max(1,Math.floor(IW/500));
   for(let y=0;y<IH;y+=step)for(let x=0;x<IW;x+=step){
     if(!isPat(x,y))continue;
     if(!top||y<top[1])top=[x,y];
@@ -428,13 +435,12 @@ function findCorners(px,IW,IH){
     if(!right||x>right[0])right=[x,y];
   }
   if(!top||!bot||!left||!right)return null;
-  // перевірка: 4 точки утворюють квадрат (сторони приблизно рівні)
   const d=(a,b)=>Math.hypot(a[0]-b[0],a[1]-b[1]);
   const s=[d(top,right),d(right,bot),d(bot,left),d(left,top)];
   const avg=(s[0]+s[1]+s[2]+s[3])/4;
   if(avg<30)return null;
   const spread=Math.max(...s)-Math.min(...s);
-  if(spread/avg>0.25)return null;  // не квадрат — сторони надто різні
+  if(spread/avg>0.25)return null;
   return {TL:top,TR:right,BR:bot,BL:left,side:avg};
 }
 // випрямляє за 4 кутами у рівний px-масив N×N
