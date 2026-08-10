@@ -31,7 +31,7 @@ canvas{max-width:100%;border:1px solid var(--line);border-radius:12px;background
 </head>
 <body>
 <div class="wrap">
-  <h1>taina · тест сканера · v2 (читання по лінійці)</h1>
+  <h1>taina · тест сканера · v3 (лінійка + відновлення по симетрії)</h1>
   <p class="sub">Пісочниця для розробки. Завантаж орнамент — покаже, що відсканувалось і як.</p>
 
   <label class="drop" id="drop">
@@ -103,6 +103,40 @@ function decodeSector(g,n,m,offset){
     by.push(v);}
   return bytesToText(by);}
 function markCell(g,n,m){const [x,y]=baseCells(m,n)[0];return g[y*n+x]?1:0;}
+
+/* ── ВІДНОВЛЕННЯ ПО СИМЕТРІЇ (голосування по дзеркальних копіях) ──
+   Кожен біт лежить у 8/4/2 клітинах (дзеркала). Пляма/блік вбиває частину копій —
+   решта цілі, більшість вирішує. Три бар'єри проти хибного читання:
+   1) minMargin — жоден біт не вирішено «на межі»;
+   2) згода — текст пояснює ≥90% клітин поля;
+   3) крос-звірка — голосування не суперечить одиночному читанню.
+   Викликається ЛИШЕ коли точне читання (100% збіг) не вдалося. */
+const VOTE_MARGIN=0.5, VOTE_AGREE=0.90;   // «сміливо»: чинить до ~26% поля
+function decodeVoted(g,n,m,offset){
+  const bc=baseCells(m,n),by=[],margins=[];const start=offset||0;
+  for(let i=start;i+7<bc.length;i+=8){
+    let v=0;
+    for(let b=0;b<8;b++){const [x,y]=bc[i+b];
+      const cells=mirrors(m,n,x,y);let ones=0;
+      for(const [X,Y] of cells)ones+=g[Y*n+X]?1:0;
+      const cnt=cells.length;let bit;
+      if(ones*2>cnt)bit=1;else if(ones*2<cnt)bit=0;else bit=g[y*n+x]?1:0;
+      margins.push(Math.abs(2*ones-cnt)/cnt);
+      v=(v<<1)|bit;}
+    by.push(v);}
+  return {text:bytesToText(by),minMargin:margins.length?Math.min(...margins):0};}
+/* повертає {text,err} якщо пройшло бар'єри, інакше null. markBit: null|0|1 */
+function recoverVoted(g,n,m,offset,markBit){
+  const v=decodeVoted(g,n,m,offset);
+  if(v.text===null)return null;
+  if(v.minMargin<VOTE_MARGIN)return null;
+  const chk=fillChannel(v.text,n,m,markBit);
+  let tot=0,match=0;
+  for(let i=0;i<n*n;i++)if(chk.dm[i]){tot++;if((chk.g[i]?1:0)===g[i])match++;}
+  if(!tot||match/tot<VOTE_AGREE)return null;
+  const s=decodeSector(g,n,m,offset);            // крос-звірка
+  if(s!==null&&s!==v.text)return null;
+  return {text:v.text,agree:match/tot};}
 
 function rowBuild(text,maxB){
   const chars=[...text],w=maxB*8,h=Math.max(chars.length,1);
@@ -316,6 +350,15 @@ function decodeByRuler(px,IW,IH,ruler){
         const cnt=[tr,tg,tb].filter(x=>x!==null).length;
         if(cnt>=2){const ne=[tr,tg,tb].filter(x=>x!==null);
           if(!ne.every(x=>x===ne[0]))results.push({kind:'three',mode:m,n,pad,res:[tr,tg,tb]});}}}}
+  // ── запасний прохід: якщо точне читання нічого не дало — відновлення по симетрії ──
+  if(!results.length){
+    for(let pad=2;pad<=8;pad++){
+      const n=T-2*pad; if(n<MINN||n%2===0)continue;
+      const cl=sampleChan(n,pad,-1);
+      for(const m of ['oct','quad','half']){
+        const rv=recoverVoted(cl,n,m,0,null);
+        if(rv)results.push({kind:'recovered',mode:m,n,pad,res:[rv.text,null,null],agree:rv.agree});}}
+  }
   const seen=new Set(),uniq=[];
   for(const r of results){const key=r.kind+'|'+r.res.join('\u0001');
     if(!seen.has(key)){seen.add(key);uniq.push(r)}}
