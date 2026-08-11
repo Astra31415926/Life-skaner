@@ -31,7 +31,7 @@ canvas{max-width:100%;border:1px solid var(--line);border-radius:12px;background
 </head>
 <body>
 <div class="wrap">
-  <h1>taina · тест сканера · v4 (+ фото-режим Bradley)</h1>
+  <h1>taina · тест сканера · v3 (лінійка + відновлення по симетрії)</h1>
   <p class="sub">Пісочниця для розробки. Завантаж орнамент — покаже, що відсканувалось і як.</p>
 
   <label class="drop" id="drop">
@@ -477,55 +477,6 @@ function deskew(px,IW,IH,corners,N){
   return out;
 }
 
-/* ═══════════════════════════════════════════════════════════════════
-   ФОТО-ШЛЯХ v4: локальний поріг Брэдлі (нерівне світло, блік, муар екрана)
-   + рамка-лінійка по регулярності. Читає з фото/паперу коротко-середні коди.
-   Використовує наявні: findOrnament, findRuler, decodeByRuler.
-   Безпечно: рішення ухвалює той самий decodeByRuler (точно + суворе голосування),
-   тож хибних читань не додає; складне чесно лишає непрочитаним.
-   ═══════════════════════════════════════════════════════════════════ */
-function bradley(px,IW,IH,winFrac,tPct){
-  const lum=i=>(px[i*4]+px[i*4+1]+px[i*4+2])/3;
-  const integ=new Float64Array(IW*IH);
-  for(let y=0;y<IH;y++){let s=0;for(let x=0;x<IW;x++){s+=lum(y*IW+x);
-    integ[y*IW+x]=(y>0?integ[(y-1)*IW+x]:0)+s;}}
-  const S=Math.max(2,Math.floor(IW*winFrac)),t=tPct;
-  const out=new Uint8ClampedArray(IW*IH*4);
-  for(let y=0;y<IH;y++)for(let x=0;x<IW;x++){
-    const x1=Math.max(x-S,0),x2=Math.min(x+S,IW-1),y1=Math.max(y-S,0),y2=Math.min(y+S,IH-1);
-    const count=(x2-x1)*(y2-y1);
-    const sum=integ[y2*IW+x2]-integ[y1*IW+x2]-integ[y2*IW+x1]+integ[y1*IW+x1];
-    const v=lum(y*IW+x);
-    const res=(v*count<=sum*(100-t)/100)?0:255;   // світліше локального серед. → 255 (дані)
-    const d=(y*IW+x)*4;out[d]=out[d+1]=out[d+2]=res;out[d+3]=255;}
-  return out;}
-function pbox_runs(get,len){let p=-1,r=[],s=0;for(let i=0;i<len;i++){const c=get(i)>127?1:0;
-  if(c!==p){if(p>=0)r.push([s,i-1]);s=i;p=c;}}r.push([s,len-1]);return r;}
-function pbox_med(a){const b=[...a].sort((x,y)=>x-y);return b[Math.floor(b.length/2)];}
-function pbox_reg(rs){if(rs.length<7)return 0;const L=rs.map(s=>s[1]-s[0]+1);const m=pbox_med(L);
-  if(m<3)return 0;let g=0;for(const l of L)if(l>=m*.55&&l<=m*1.45)g++;return g/rs.length;}
-function pbox_rulerBox(px,W,H){const lum=(x,y)=>px[(y*W+x)*4];
-  const T=()=>{for(let y=Math.floor(H*.004);y<Math.floor(H*.25);y++)if(pbox_reg(pbox_runs(k=>lum(k,y),W))>=.75)return y;return -1;};
-  const B=()=>{for(let y=H-1-Math.floor(H*.004);y>Math.floor(H*.75);y--)if(pbox_reg(pbox_runs(k=>lum(k,y),W))>=.75)return y;return -1;};
-  const L=()=>{for(let x=Math.floor(W*.004);x<Math.floor(W*.25);x++)if(pbox_reg(pbox_runs(k=>lum(x,k),H))>=.75)return x;return -1;};
-  const R=()=>{for(let x=W-1-Math.floor(W*.004);x>Math.floor(W*.75);x--)if(pbox_reg(pbox_runs(k=>lum(x,k),H))>=.75)return x;return -1;};
-  const t=T(),b=B(),l=L(),r=R();if([t,b,l,r].some(v=>v<0))return null;return {x0:l,y0:t,w:r-l+1,h:b-t+1};}
-function pbox_toSquare(px,W,H){const N=Math.max(W,H);const o=new Uint8ClampedArray(N*N*4);
-  for(let y=0;y<N;y++)for(let x=0;x<N;x++){const sx=Math.min(W-1,Math.floor(x*W/N)),sy=Math.min(H-1,Math.floor(y*H/N));
-    const s=(sy*W+sx)*4,d=(y*N+x)*4;o[d]=px[s];o[d+1]=px[s+1];o[d+2]=px[s+2];o[d+3]=255;}return {px:o,N};}
-function scanPhoto(px,IW,IH){
-  const box=findOrnament(px,IW,IH);if(!box)return [];
-  const cpx=cropPx(px,IW,IH,box);let out=[];
-  for(const wt of [[1/12,12],[1/16,10],[1/8,15]]){
-    const b=bradley(cpx,box.w,box.h,wt[0],wt[1]);
-    const rb=pbox_rulerBox(b,box.w,box.h);if(!rb)continue;
-    if(rb.w/rb.h<0.85||rb.w/rb.h>1.18)continue;
-    const bc=cropPx(b,box.w,box.h,rb);
-    const sq=pbox_toSquare(bc,rb.w,rb.h);
-    const ru=findRuler(sq.px,sq.N,sq.N);if(!ru)continue;
-    const rr=decodeByRuler(sq.px,sq.N,sq.N,ru);if(rr.length)out=out.concat(rr);}
-  return out;}
-
 // ── UI ──
 const $=id=>document.getElementById(id);
 const cv=$('cv'),ctx=cv.getContext('2d',{willReadFrequently:true});
@@ -579,9 +530,6 @@ function processImage(img){
   if(corners){const N=Math.max(512,Math.min(1400,Math.round(corners.side)));
     const dpx=deskew(px,IW,IH,corners,N);
     collect(dpx,N,N,'шлях Б (випрямлення)',null,corners,attempts);}
-  // 4) фото-режим (Bradley) — екран/папір, блік, нерівне світло
-  try{const pf=scanPhoto(px,IW,IH);
-    if(pf.length)attempts.push({f:pf,path:'фото-режим (Bradley)',box:null,corners:null,ruler:{T:pf[0].n}});}catch(e){}
 
   // найкращий: найдовший валідний текст; за рівності — з лінійкою (точніший)
   attempts.sort((a,b)=>{
